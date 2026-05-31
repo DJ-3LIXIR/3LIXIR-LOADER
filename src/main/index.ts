@@ -23,6 +23,22 @@ function powershellQuote(value: string): string {
   return `'${value.replace(/'/g, "''")}'`
 }
 
+function resolveWindowsVst2InstallDir(): string {
+  const programFiles = process.env['PROGRAMFILES'] || 'C:\\Program Files'
+
+  if (fs.existsSync(programFiles)) {
+    const existingVstPluginsDir = fs
+      .readdirSync(programFiles, { withFileTypes: true })
+      .find(entry => entry.isDirectory() && entry.name.toLowerCase() === 'vstplugins')
+
+    if (existingVstPluginsDir) {
+      return path.join(programFiles, existingVstPluginsDir.name)
+    }
+  }
+
+  return path.join(os.homedir(), 'Documents', 'VSTPlugins')
+}
+
 async function runElevatedPowerShell(command: string): Promise<void> {
   const innerArgs = `-NoProfile -ExecutionPolicy Bypass -Command ${powershellQuote(command)}`
   const startProcessCommand = `Start-Process -FilePath powershell.exe -Verb RunAs -Wait -ArgumentList ${powershellQuote(innerArgs)}`
@@ -178,8 +194,8 @@ ipcMain.handle('install-plugin', async (_event, { filename, data }) => {
         }
       : {
           '.vst3':      path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files', 'VST3'),
-          '.vst':       path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'VSTPlugins'),
-          '.dll':       path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'VSTPlugins'),
+          '.vst':       resolveWindowsVst2InstallDir(),
+          '.dll':       resolveWindowsVst2InstallDir(),
           '.aaxplugin': path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files', 'Avid', 'Audio', 'Plug-Ins'),
           '.clap':      path.join(process.env['COMMONPROGRAMFILES'] || path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files'), 'CLAP'),
         }
@@ -400,8 +416,8 @@ ipcMain.handle('uninstall-plugin', async (_event, { pluginName }) => {
       }
     : {
         '.vst3':      path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files', 'VST3'),
-        '.vst':       path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'VSTPlugins'),
-        '.dll':       path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'VSTPlugins'),
+        '.vst':       resolveWindowsVst2InstallDir(),
+        '.dll':       resolveWindowsVst2InstallDir(),
         '.aaxplugin': path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files', 'Avid', 'Audio', 'Plug-Ins'),
         '.clap':      path.join(process.env['COMMONPROGRAMFILES'] || path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files'), 'CLAP'),
       }
