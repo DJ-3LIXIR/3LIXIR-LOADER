@@ -1,7 +1,7 @@
 {
   "name": "3lixir-loader",
   "productName": "3LIXIR LOADER",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "description": "Plugin downloader for 3LIXIR MUSIC",
   "main": "./out/main/index.js",
   "author": "3LIXIR MUSIC",
