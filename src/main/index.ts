@@ -47,12 +47,14 @@ async function copyWindowsPath(src: string, dest: string, installDir: string): P
     if (!isPermissionError(err)) throw err
 
     await runElevatedPowerShell(
-      [
-        `New-Item -ItemType Directory -Force -Path ${powershellQuote(installDir)} | Out-Null`,
-        `Copy-Item -LiteralPath ${powershellQuote(src)} -Destination ${powershellQuote(dest)} -Recurse -Force`,
-      ].join('; ')
-    )
-    if (!fs.existsSync(dest)) throw new Error(`Failed to install ${path.basename(dest)}`)
+  [
+    `New-Item -ItemType Directory -Force -Path ${powershellQuote(installDir)} | Out-Null`,
+    `Copy-Item -LiteralPath ${powershellQuote(src)} -Destination ${powershellQuote(installDir)} -Recurse -Force`,
+  ].join('; ')
+)
+// Give it a moment to finish
+await new Promise(resolve => setTimeout(resolve, 500))
+if (!fs.existsSync(dest)) throw new Error(`Failed to install ${path.basename(dest)}`)
   }
 }
 
