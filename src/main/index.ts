@@ -229,10 +229,38 @@ ipcMain.handle('install-plugin', async (_event, { filename, data }) => {
       return null
     }
 
+    function filePlatform(filePath: string): 'mac' | 'windows' | 'both' | null {
+      const ext = path.extname(filePath).toLowerCase()
+
+      if (ext === '.component' || ext === '.au') return 'mac'
+      if (ext === '.dll') return 'windows'
+
+      if (ext === '.vst3') {
+        const contentsDir = path.join(filePath, 'Contents')
+        if (fs.existsSync(contentsDir) && fs.statSync(contentsDir).isDirectory()) {
+          const subfolders = fs.readdirSync(contentsDir)
+          const hasWin = subfolders.some((folder) => folder.toLowerCase().includes('win'))
+          const hasMac = subfolders.some((folder) => {
+            const normalized = folder.toLowerCase()
+            return normalized.includes('mac') || normalized.includes('macos')
+          })
+
+          if (hasWin && hasMac) return 'both'
+          if (hasWin) return 'windows'
+          if (hasMac) return 'mac'
+        }
+
+        return pathPlatform(filePath) ?? 'both'
+      }
+
+      return pathPlatform(filePath) ?? 'both'
+    }
+
     const discoveredPluginPaths = findPlugins(unzipDir)
-    const platformPluginPaths = discoveredPluginPaths.filter(src => pathPlatform(src) === currentPlatform)
-    const genericPluginPaths = discoveredPluginPaths.filter(src => pathPlatform(src) === null)
-    const pluginPaths = platformPluginPaths.length > 0 ? platformPluginPaths : genericPluginPaths
+    const pluginPaths = discoveredPluginPaths.filter((src) => {
+      const pluginPlatform = filePlatform(src)
+      return pluginPlatform === currentPlatform || pluginPlatform === 'both'
+    })
 
     // Paths that require admin privileges on macOS
     const systemPaths = ['/Library/Application Support/Avid/Audio/Plug-Ins']
