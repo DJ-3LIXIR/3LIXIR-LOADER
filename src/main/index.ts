@@ -155,8 +155,8 @@ ipcMain.handle('install-plugin', async (_event, { filename, data }) => {
       : ['.vst3', '.vst', '.dll', '.aaxplugin', '.clap']
     const currentPlatform = isMac ? 'mac' : 'windows'
     const platformMarkers = {
-      mac: new Set(['mac', 'macos', 'osx', 'darwin']),
-      windows: new Set(['win', 'win32', 'win64', 'windows']),
+      mac: new Set(['mac', 'macos', 'osx', 'darwin', 'macosx']),
+      windows: new Set(['win', 'win32', 'win64', 'windows', 'visualstudio', 'visualstudio2026', 'x64']),
     }
 
     const installDirs: Record<string, string> = isMac
@@ -176,15 +176,19 @@ ipcMain.handle('install-plugin', async (_event, { filename, data }) => {
     const installSummary: InstallSummary = { plugins: [], content: [] }
 
     // Recursively walk the unzipped dir and collect all plugin paths
-    function findPlugins(dir: string): string[] {
+    function findPlugins(dir: string, depth = 0): string[] {
       const results: string[] = []
+      if (depth > 8) return results
+
       for (const entry of fs.readdirSync(dir)) {
         const fullPath = path.join(dir, entry)
         const ext = path.extname(entry).toLowerCase()
+        const stat = fs.statSync(fullPath)
+
         if (PLUGIN_EXTS.includes(ext)) {
           results.push(fullPath)
-        } else if (fs.statSync(fullPath).isDirectory()) {
-          results.push(...findPlugins(fullPath))
+        } else if (stat.isDirectory()) {
+          results.push(...findPlugins(fullPath, depth + 1))
         }
       }
       return results
