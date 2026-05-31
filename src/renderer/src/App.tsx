@@ -16,10 +16,15 @@ type Plugin = {
 
 type NavItem = 'all' | 'not-installed' | 'updates' | 'installed' | 'hidden'
 type Category = 'Apps' | 'Content' | 'Plugins' | 'Instruments' | 'Audio Units'
+type DownloadPlatform = 'mac' | 'windows'
 
 const GOLD = '#C9A84C'
 const GOLD_BRIGHT = '#F0C040'
 const GOLD_DIM = '#8B6914'
+
+function getDownloadPlatform(): DownloadPlatform {
+  return window.api.getPlatform() === 'darwin' ? 'mac' : 'windows'
+}
 
 function normalizePluginStatus(status: string): 'update' | 'installed' | 'not-installed' | 'coming soon' | 'available' | 'unknown' {
   const normalized = status.trim().toLowerCase().replace(/[_\s]+/g, '-')
@@ -151,7 +156,7 @@ export default function App() {
           'apikey': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRjaXVncmF0dXR4eHJkdGJzeGltIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njc0NzYwMDgsImV4cCI6MjA4MzA1MjAwOH0.-yif_fwvYOwE6kG4nkSc1HXyF-cHTlZGWGJ91YXsPuM',
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ plugin_id: plugin.id }),
+        body: JSON.stringify({ plugin_id: plugin.id, platform: getDownloadPlatform() }),
       })
 
       if (!response.ok) {
@@ -164,10 +169,16 @@ export default function App() {
       let fileResponse: Response
 
       if (contentType.includes('application/json')) {
-        const { url: signedUrl } = await response.json()
+        const { url: signedUrl, filename: signedFilename } = await response.json()
         if (!signedUrl) throw new Error('No download URL returned')
         fileResponse = await fetch(signedUrl)
         if (!fileResponse.ok) throw new Error(`Download failed: ${fileResponse.status}`)
+        fileResponse = new Response(fileResponse.body, {
+          headers: fileResponse.headers,
+          status: fileResponse.status,
+          statusText: fileResponse.statusText,
+        })
+        if (signedFilename) fileResponse.headers.set('X-3lixir-Filename', signedFilename)
       } else {
         fileResponse = response
       }
@@ -200,8 +211,7 @@ export default function App() {
       setDownloadProgress(92)
       setDownloadLabel(`Installing ${plugin.name}…`)
 
-      const filename = `${plugin.name.replace(/\s+/g, '_')}.zip`
-      // @ts-ignore
+      const filename = fileResponse.headers.get('X-3lixir-Filename') || `${plugin.name.replace(/\s+/g, '_')}.zip`
       const result = await window.api.installPlugin(filename, allBytes)
 
       if (result.success) {
@@ -227,7 +237,6 @@ export default function App() {
     if (uninstalling) return
     setUninstalling(plugin.id)
     try {
-      // @ts-ignore
       const result = await window.api.uninstallPlugin(plugin.name)
       if (result.success) {
         await supabase.from('plugins').update({ status: 'not-installed' }).eq('id', plugin.id)

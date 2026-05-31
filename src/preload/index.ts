@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
 const api = {
+  getPlatform: () => process.platform,
   installPlugin: (filename: string, data: Uint8Array) =>
     ipcRenderer.invoke('install-plugin', { filename, data }),
   uninstallPlugin: (pluginName: string) =>

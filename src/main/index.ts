@@ -5,7 +5,62 @@ import icon from '../../resources/icon.png?asset'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import { exec } from 'child_process'
+import { exec, execFile, execSync } from 'child_process'
+
+function isPermissionError(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    ('code' in err ? err.code === 'EACCES' || err.code === 'EPERM' : false)
+  )
+}
+
+function powershellQuote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`
+}
+
+async function runElevatedPowerShell(command: string): Promise<void> {
+  const innerArgs = `-NoProfile -ExecutionPolicy Bypass -Command ${powershellQuote(command)}`
+  const startProcessCommand = `Start-Process -FilePath powershell.exe -Verb RunAs -Wait -ArgumentList ${powershellQuote(innerArgs)}`
+
+  await new Promise<void>((resolve, reject) => {
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', startProcessCommand],
+      (err) => {
+        if (err) reject(err)
+        else resolve()
+      }
+    )
+  })
+}
+
+async function copyWindowsPath(src: string, dest: string, installDir: string): Promise<void> {
+  try {
+    fs.mkdirSync(installDir, { recursive: true })
+    fs.cpSync(src, dest, { recursive: true })
+  } catch (err) {
+    if (!isPermissionError(err)) throw err
+
+    await runElevatedPowerShell(
+      [
+        `New-Item -ItemType Directory -Force -Path ${powershellQuote(installDir)} | Out-Null`,
+        `Copy-Item -LiteralPath ${powershellQuote(src)} -Destination ${powershellQuote(dest)} -Recurse -Force`,
+      ].join('; ')
+    )
+    if (!fs.existsSync(dest)) throw new Error(`Failed to install ${path.basename(dest)}`)
+  }
+}
+
+async function removeWindowsPath(fullPath: string): Promise<void> {
+  try {
+    fs.rmSync(fullPath, { recursive: true, force: true })
+  } catch (err) {
+    if (!isPermissionError(err)) throw err
+
+    await runElevatedPowerShell(`Remove-Item -LiteralPath ${powershellQuote(fullPath)} -Recurse -Force`)
+    if (fs.existsSync(fullPath)) throw new Error(`Failed to remove ${path.basename(fullPath)}`)
+  }
+}
 
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
@@ -76,6 +131,11 @@ ipcMain.handle('install-plugin', async (_event, { filename, data }) => {
     const PLUGIN_EXTS = isMac
       ? ['.vst3', '.component', '.au', '.aaxplugin']
       : ['.vst3', '.dll', '.aaxplugin']
+    const currentPlatform = isMac ? 'mac' : 'windows'
+    const platformMarkers = {
+      mac: new Set(['mac', 'macos', 'osx', 'darwin']),
+      windows: new Set(['win', 'win32', 'win64', 'windows']),
+    }
 
     const installDirs: Record<string, string> = isMac
       ? {
@@ -95,7 +155,7 @@ ipcMain.handle('install-plugin', async (_event, { filename, data }) => {
       const results: string[] = []
       for (const entry of fs.readdirSync(dir)) {
         const fullPath = path.join(dir, entry)
-        const ext = path.extname(entry)
+        const ext = path.extname(entry).toLowerCase()
         if (PLUGIN_EXTS.includes(ext)) {
           results.push(fullPath)
         } else if (fs.statSync(fullPath).isDirectory()) {
@@ -105,7 +165,28 @@ ipcMain.handle('install-plugin', async (_event, { filename, data }) => {
       return results
     }
 
-    const pluginPaths = findPlugins(unzipDir)
+    function segmentMatchesPlatform(segment: string, platform: 'mac' | 'windows'): boolean {
+      const normalized = segment.toLowerCase().replace(/[^a-z0-9]+/g, '')
+      const tokens = segment.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+      return platformMarkers[platform].has(normalized) || tokens.some(token => platformMarkers[platform].has(token))
+    }
+
+    function pathPlatform(filePath: string): 'mac' | 'windows' | null {
+      const segments = path.relative(unzipDir, filePath).split(path.sep)
+
+      for (const segment of segments) {
+        if (segmentMatchesPlatform(segment, 'mac')) return 'mac'
+        if (segmentMatchesPlatform(segment, 'windows')) return 'windows'
+      }
+
+      return null
+    }
+
+    const discoveredPluginPaths = findPlugins(unzipDir)
+    const platformPluginPaths = discoveredPluginPaths.filter(src => pathPlatform(src) === currentPlatform)
+    const genericPluginPaths = discoveredPluginPaths.filter(src => pathPlatform(src) === null)
+    const pluginPaths = platformPluginPaths.length > 0 ? platformPluginPaths : genericPluginPaths
+
     if (pluginPaths.length === 0) throw new Error('No plugin file found in zip')
 
     // Paths that require admin privileges on macOS
@@ -145,9 +226,7 @@ ipcMain.handle('install-plugin', async (_event, { filename, data }) => {
           })
         }
       } else {
-        fs.mkdirSync(installDir, { recursive: true })
-        // Windows: use fs.cpSync for reliable cross-platform copy
-        fs.cpSync(src, dest, { recursive: true })
+        await copyWindowsPath(src, dest, installDir)
       }
     }
 
@@ -239,9 +318,11 @@ ipcMain.handle('uninstall-plugin', async (_event, { pluginName }) => {
         const needsElevation = isMac && dir.startsWith('/Library/')
         if (needsElevation) {
           const script = `rm -rf "${fullPath}"`
-          require('child_process').execSync(
+          execSync(
             `osascript -e 'do shell script "${script.replace(/"/g, '\\"')}" with administrator privileges'`
           )
+        } else if (!isMac) {
+          await removeWindowsPath(fullPath)
         } else {
           fs.rmSync(fullPath, { recursive: true, force: true })
         }
