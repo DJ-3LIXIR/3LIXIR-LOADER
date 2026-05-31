@@ -175,6 +175,22 @@ ipcMain.handle('install-plugin', async (_event, { filename, data }) => {
         }
     const installSummary: InstallSummary = { plugins: [], content: [] }
 
+    function isBuildArtifact(entry: string): boolean {
+      const name = entry.toLowerCase()
+      return (
+        name.endsWith('.dll.recipe') ||
+        name.endsWith('.lib') ||
+        name.endsWith('.pdb') ||
+        name.endsWith('.exp') ||
+        name.endsWith('.iobj') ||
+        name.endsWith('.ipdb') ||
+        name.endsWith('.obj') ||
+        name.endsWith('.res') ||
+        name.endsWith('.log') ||
+        name.endsWith('.tlog')
+      )
+    }
+
     // Recursively walk the unzipped dir and collect all plugin paths
     function findPlugins(dir: string, depth = 0): string[] {
       const results: string[] = []
@@ -186,7 +202,9 @@ ipcMain.handle('install-plugin', async (_event, { filename, data }) => {
         const stat = fs.statSync(fullPath)
 
         if (PLUGIN_EXTS.includes(ext)) {
-          results.push(fullPath)
+          if (!isBuildArtifact(entry)) {
+            results.push(fullPath)
+          }
         } else if (stat.isDirectory()) {
           results.push(...findPlugins(fullPath, depth + 1))
         }
