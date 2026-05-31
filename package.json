@@ -18,7 +18,8 @@
     "postinstall": "electron-builder install-app-deps",
     "build:unpack": "npm run build && electron-builder --dir",
     "build:win": "npm run build && electron-builder --win",
-    "build:mac": "electron-vite build && electron-builder --mac",
+    "build:mac": "npm run typecheck && node scripts/validate-mac-release-env.cjs && electron-vite build && electron-builder --mac",
+    "build:mac:local": "npm run typecheck && electron-vite build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --config.mac.identity=null --config.mac.notarize=false --config.mac.hardenedRuntime=false --config.mac.gatekeeperAssess=false --config.mac.forceCodeSigning=false",
     "build:linux": "electron-vite build && electron-builder --linux"
   },
   "dependencies": {

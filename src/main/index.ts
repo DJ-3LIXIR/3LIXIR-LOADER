@@ -7,6 +7,11 @@ import * as path from 'path'
 import * as os from 'os'
 import { exec, execFile, execSync } from 'child_process'
 
+type InstallSummary = {
+  plugins: string[]
+  content: string[]
+}
+
 function isPermissionError(err: unknown): boolean {
   return (
     err instanceof Error &&
@@ -48,6 +53,23 @@ async function copyWindowsPath(src: string, dest: string, installDir: string): P
       ].join('; ')
     )
     if (!fs.existsSync(dest)) throw new Error(`Failed to install ${path.basename(dest)}`)
+  }
+}
+
+async function copyWindowsDirectory(src: string, dest: string): Promise<void> {
+  try {
+    fs.mkdirSync(path.dirname(dest), { recursive: true })
+    fs.cpSync(src, dest, { recursive: true })
+  } catch (err) {
+    if (!isPermissionError(err)) throw err
+
+    await runElevatedPowerShell(
+      [
+        `New-Item -ItemType Directory -Force -Path ${powershellQuote(path.dirname(dest))} | Out-Null`,
+        `Copy-Item -LiteralPath ${powershellQuote(src)} -Destination ${powershellQuote(dest)} -Recurse -Force`,
+      ].join('; ')
+    )
+    if (!fs.existsSync(dest)) throw new Error(`Failed to copy ${path.basename(dest)}`)
   }
 }
 
@@ -130,7 +152,7 @@ ipcMain.handle('install-plugin', async (_event, { filename, data }) => {
     // 3. Find all plugin files/bundles recursively inside the unzipped folder
     const PLUGIN_EXTS = isMac
       ? ['.vst3', '.component', '.au', '.aaxplugin']
-      : ['.vst3', '.dll', '.aaxplugin']
+      : ['.vst3', '.vst', '.dll', '.aaxplugin', '.clap']
     const currentPlatform = isMac ? 'mac' : 'windows'
     const platformMarkers = {
       mac: new Set(['mac', 'macos', 'osx', 'darwin']),
@@ -146,9 +168,12 @@ ipcMain.handle('install-plugin', async (_event, { filename, data }) => {
         }
       : {
           '.vst3':      path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files', 'VST3'),
-          '.dll':       path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files', 'VST2'),
+          '.vst':       path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'VSTPlugins'),
+          '.dll':       path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'VSTPlugins'),
           '.aaxplugin': path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files', 'Avid', 'Audio', 'Plug-Ins'),
+          '.clap':      path.join(process.env['COMMONPROGRAMFILES'] || path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files'), 'CLAP'),
         }
+    const installSummary: InstallSummary = { plugins: [], content: [] }
 
     // Recursively walk the unzipped dir and collect all plugin paths
     function findPlugins(dir: string): string[] {
@@ -187,15 +212,13 @@ ipcMain.handle('install-plugin', async (_event, { filename, data }) => {
     const genericPluginPaths = discoveredPluginPaths.filter(src => pathPlatform(src) === null)
     const pluginPaths = platformPluginPaths.length > 0 ? platformPluginPaths : genericPluginPaths
 
-    if (pluginPaths.length === 0) throw new Error('No plugin file found in zip')
-
     // Paths that require admin privileges on macOS
     const systemPaths = ['/Library/Application Support/Avid/Audio/Plug-Ins']
 
     // Install each plugin found
     for (const src of pluginPaths) {
       const pluginFile = path.basename(src)
-      const ext = path.extname(pluginFile)
+      const ext = path.extname(pluginFile).toLowerCase()
       const installDir = installDirs[ext]
       if (!installDir) continue
 
@@ -228,55 +251,72 @@ ipcMain.handle('install-plugin', async (_event, { filename, data }) => {
       } else {
         await copyWindowsPath(src, dest, installDir)
       }
+      installSummary.plugins.push(dest)
     }
 
     // 4. Copy preset/library folders (e.g. ARK Presets) to ~/Documents/<PluginName>/Presets
-    function findPresetFolders(dir: string): string[] {
+    function findContentFolders(dir: string): string[] {
       const results: string[] = []
       for (const entry of fs.readdirSync(dir)) {
-        if (entry.toLowerCase() === 'presets' || entry.toLowerCase() === 'library') {
-          const fullPath = path.join(dir, entry)
-          if (fs.statSync(fullPath).isDirectory()) {
+        const fullPath = path.join(dir, entry)
+        if (!fs.statSync(fullPath).isDirectory()) continue
+
+        if (['presets', 'preset', 'library', 'libraries', 'samples', 'sample', 'content'].includes(entry.toLowerCase())) {
+          if (pathPlatform(fullPath) === currentPlatform || pathPlatform(fullPath) === null) {
             results.push(fullPath)
           }
+        } else {
+          results.push(...findContentFolders(fullPath))
         }
       }
       return results
     }
 
-    // Search for Presets/Library folders inside the unzipped content (one level deep)
-    const topLevelDirs = fs.readdirSync(unzipDir).filter(e =>
-      fs.statSync(path.join(unzipDir, e)).isDirectory()
-    )
+    function packageNameForContent(contentPath: string): string {
+      const relativeParts = path.relative(unzipDir, contentPath).split(path.sep)
+      const contentIndex = relativeParts.length - 1
+      const parent = relativeParts[contentIndex - 1]
 
-    for (const topDir of topLevelDirs) {
-      const topPath = path.join(unzipDir, topDir)
-      const presetFolders = findPresetFolders(topPath)
-
-      for (const presetSrc of presetFolders) {
-        const folderName = path.basename(presetSrc) // "Presets" or "Library"
-        const pluginName = topDir // e.g. "ARK"
-        const destDir = path.join(os.homedir(), 'Documents', pluginName, folderName)
-
-        if (isMac) {
-          fs.mkdirSync(destDir, { recursive: true })
-          await new Promise<void>((resolve, reject) => {
-            exec(`ditto "${presetSrc}" "${destDir}"`, (err) => {
-              if (err) reject(err)
-              else resolve()
-            })
-          })
-        } else {
-          fs.mkdirSync(destDir, { recursive: true })
-          fs.cpSync(presetSrc, destDir, { recursive: true })
-        }
+      if (parent && !segmentMatchesPlatform(parent, 'mac') && !segmentMatchesPlatform(parent, 'windows')) {
+        return parent
       }
+
+      const firstMeaningfulPart = relativeParts.find(part =>
+        !segmentMatchesPlatform(part, 'mac') &&
+        !segmentMatchesPlatform(part, 'windows') &&
+        !['presets', 'preset', 'library', 'libraries', 'samples', 'sample', 'content'].includes(part.toLowerCase())
+      )
+      return firstMeaningfulPart || path.basename(contentPath)
+    }
+
+    const contentFolders = findContentFolders(unzipDir)
+    for (const contentSrc of contentFolders) {
+      const folderName = path.basename(contentSrc)
+      const pluginName = packageNameForContent(contentSrc)
+      const destDir = path.join(os.homedir(), 'Documents', pluginName, folderName)
+
+      if (isMac) {
+        fs.mkdirSync(destDir, { recursive: true })
+        await new Promise<void>((resolve, reject) => {
+          exec(`ditto "${contentSrc}" "${destDir}"`, (err) => {
+            if (err) reject(err)
+            else resolve()
+          })
+        })
+      } else {
+        await copyWindowsDirectory(contentSrc, destDir)
+      }
+      installSummary.content.push(destDir)
+    }
+
+    if (installSummary.plugins.length === 0 && installSummary.content.length === 0) {
+      throw new Error(`No installable plugins or content folders found in ${filename}`)
     }
 
     // 5. Clean up temp files
     fs.rmSync(tempDir, { recursive: true, force: true })
 
-    return { success: true }
+    return { success: true, installed: installSummary }
   } catch (err: unknown) {
     fs.rmSync(tempDir, { recursive: true, force: true })
     const message = err instanceof Error ? err.message : String(err)
@@ -289,7 +329,7 @@ ipcMain.handle('uninstall-plugin', async (_event, { pluginName }) => {
   const isMac = process.platform === 'darwin'
   const PLUGIN_EXTS = isMac
     ? ['.vst3', '.component', '.au', '.aaxplugin']
-    : ['.vst3', '.dll', '.aaxplugin']
+    : ['.vst3', '.vst', '.dll', '.aaxplugin', '.clap']
 
   const installDirs: Record<string, string> = isMac
     ? {
@@ -300,8 +340,10 @@ ipcMain.handle('uninstall-plugin', async (_event, { pluginName }) => {
       }
     : {
         '.vst3':      path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files', 'VST3'),
-        '.dll':       path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files', 'VST2'),
+        '.vst':       path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'VSTPlugins'),
+        '.dll':       path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'VSTPlugins'),
         '.aaxplugin': path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files', 'Avid', 'Audio', 'Plug-Ins'),
+        '.clap':      path.join(process.env['COMMONPROGRAMFILES'] || path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files'), 'CLAP'),
       }
 
   const removed: string[] = []
