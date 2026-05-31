@@ -40,21 +40,29 @@ async function runElevatedPowerShell(command: string): Promise<void> {
 }
 
 async function copyWindowsPath(src: string, dest: string, installDir: string): Promise<void> {
+  const srcStat = fs.statSync(src)
+
   try {
     fs.mkdirSync(installDir, { recursive: true })
-    fs.cpSync(src, dest, { recursive: true })
+    if (srcStat.isDirectory()) {
+      fs.cpSync(src, dest, { recursive: true })
+    } else {
+      fs.copyFileSync(src, dest)
+    }
   } catch (err) {
     if (!isPermissionError(err)) throw err
 
     await runElevatedPowerShell(
-  [
-    `New-Item -ItemType Directory -Force -Path ${powershellQuote(installDir)} | Out-Null`,
-    `Copy-Item -LiteralPath ${powershellQuote(src)} -Destination ${powershellQuote(installDir)} -Recurse -Force`,
-  ].join('; ')
-)
-// Give it a moment to finish
-await new Promise(resolve => setTimeout(resolve, 500))
-if (!fs.existsSync(dest)) throw new Error(`Failed to install ${path.basename(dest)}`)
+      [
+        `New-Item -ItemType Directory -Force -Path ${powershellQuote(installDir)} | Out-Null`,
+        srcStat.isDirectory()
+          ? `Copy-Item -LiteralPath ${powershellQuote(src)} -Destination ${powershellQuote(dest)} -Recurse -Force`
+          : `Copy-Item -LiteralPath ${powershellQuote(src)} -Destination ${powershellQuote(dest)} -Force`,
+      ].join('; ')
+    )
+    // Give Windows a moment to refresh filesystem state after the elevated copy exits.
+    await new Promise(resolve => setTimeout(resolve, 500))
+    if (!fs.existsSync(dest)) throw new Error(`Failed to install ${path.basename(dest)}`)
   }
 }
 
