@@ -141,7 +141,7 @@ ipcMain.handle('install-plugin', async (_event, { filename, data }) => {
     fs.mkdirSync(unzipDir)
     await new Promise<void>((resolve, reject) => {
       const cmd = isWin
-        ? `tar -xf "${zipPath}" -C "${unzipDir}"`
+        ? `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${unzipDir}' -Force"`
         : `unzip -o "${zipPath}" -d "${unzipDir}"`
       exec(cmd, (err) => {
         if (err) reject(err)
