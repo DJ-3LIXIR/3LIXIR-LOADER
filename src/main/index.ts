@@ -5,7 +5,7 @@ import icon from '../../resources/icon.png?asset'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import { exec, execFile, execSync } from 'child_process'
+import { exec, execFile, execFileSync, execSync } from 'child_process'
 
 type InstallSummary = {
   plugins: string[]
@@ -40,44 +40,82 @@ function resolveWindowsVst2InstallDir(): string {
 }
 
 async function runElevatedPowerShell(command: string): Promise<void> {
+  const logFile = path.join(os.homedir(), 'Desktop', '3lixir-debug.log')
+  const log = (msg: string) => fs.appendFileSync(logFile, new Date().toISOString() + ' ' + msg + '\n')
+
   const innerArgs = `-NoProfile -ExecutionPolicy Bypass -Command ${powershellQuote(command)}`
   const startProcessCommand = `Start-Process -FilePath powershell.exe -Verb RunAs -Wait -ArgumentList ${powershellQuote(innerArgs)}`
+
+  log(`elevated command: ${command}`)
 
   await new Promise<void>((resolve, reject) => {
     execFile(
       'powershell.exe',
       ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', startProcessCommand],
-      (err) => {
-        if (err) reject(err)
-        else resolve()
+      (err, stdout, stderr) => {
+        log(`elevated stdout: ${stdout}`)
+        log(`elevated stderr: ${stderr}`)
+        if (err) {
+          log(`elevated error: ${String(err)}`)
+          reject(err)
+        } else {
+          resolve()
+        }
       }
     )
   })
 }
 
 async function copyWindowsPath(src: string, dest: string, installDir: string): Promise<void> {
-  const srcStat = fs.statSync(src)
+  const originalSrc = src
+  try {
+    src = execFileSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        `(Get-Item -LiteralPath ${powershellQuote(src)}).FullName`,
+      ],
+      { encoding: 'utf8' }
+    ).trim()
+  } catch {
+    // Keep the original path if PowerShell cannot resolve it.
+  }
+
+  const logFile = path.join(os.homedir(), 'Desktop', '3lixir-debug.log')
+  const log = (msg: string) => fs.appendFileSync(logFile, new Date().toISOString() + ' ' + msg + '\n')
+  const stat = fs.statSync(src)
+
+  log(`original src: ${originalSrc}`)
+  log(`src: ${src}`)
+  log(`dest: ${dest}`)
+  log(`installDir: ${installDir}`)
+  log(`src exists: ${fs.existsSync(src)}`)
 
   try {
     fs.mkdirSync(installDir, { recursive: true })
-    if (srcStat.isDirectory()) {
+    if (stat.isDirectory()) {
       fs.cpSync(src, dest, { recursive: true })
     } else {
       fs.copyFileSync(src, dest)
     }
+    log('copied without elevation')
   } catch (err) {
+    log(`copy error: ${String(err)}`)
     if (!isPermissionError(err)) throw err
-
+    log('trying elevated copy...')
     await runElevatedPowerShell(
       [
         `New-Item -ItemType Directory -Force -Path ${powershellQuote(installDir)} | Out-Null`,
-        srcStat.isDirectory()
+        stat.isDirectory()
           ? `Copy-Item -LiteralPath ${powershellQuote(src)} -Destination ${powershellQuote(dest)} -Recurse -Force`
           : `Copy-Item -LiteralPath ${powershellQuote(src)} -Destination ${powershellQuote(dest)} -Force`,
       ].join('; ')
     )
-    // Give Windows a moment to refresh filesystem state after the elevated copy exits.
     await new Promise(resolve => setTimeout(resolve, 500))
+    log(`dest exists after elevation: ${fs.existsSync(dest)}`)
     if (!fs.existsSync(dest)) throw new Error(`Failed to install ${path.basename(dest)}`)
   }
 }
@@ -193,9 +231,9 @@ ipcMain.handle('install-plugin', async (_event, { filename, data }) => {
           '.aaxplugin': '/Library/Application Support/Avid/Audio/Plug-Ins',
         }
       : {
-          '.vst3':      path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files', 'VST3'),
+          '.vst3':      path.join(os.homedir(), 'Documents', 'VST3'),
           '.vst':       resolveWindowsVst2InstallDir(),
-          '.dll':       resolveWindowsVst2InstallDir(),
+          '.dll':       path.join(os.homedir(), 'Documents', 'VSTPlugins'),
           '.aaxplugin': path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files', 'Avid', 'Audio', 'Plug-Ins'),
           '.clap':      path.join(process.env['COMMONPROGRAMFILES'] || path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files'), 'CLAP'),
         }
@@ -415,9 +453,9 @@ ipcMain.handle('uninstall-plugin', async (_event, { pluginName }) => {
         '.aaxplugin': '/Library/Application Support/Avid/Audio/Plug-Ins',
       }
     : {
-        '.vst3':      path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files', 'VST3'),
+        '.vst3':      path.join(os.homedir(), 'Documents', 'VST3'),
         '.vst':       resolveWindowsVst2InstallDir(),
-        '.dll':       resolveWindowsVst2InstallDir(),
+        '.dll':       path.join(os.homedir(), 'Documents', 'VSTPlugins'),
         '.aaxplugin': path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files', 'Avid', 'Audio', 'Plug-Ins'),
         '.clap':      path.join(process.env['COMMONPROGRAMFILES'] || path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files'), 'CLAP'),
       }
