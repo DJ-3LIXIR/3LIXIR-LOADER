@@ -1,5 +1,9 @@
 appId: com.3lixirmusic.loader
 productName: 3LIXIR LOADER
+protocols:
+  - name: 3LIXIR Loader
+    schemes:
+      - 3lixir-loader
 directories:
   buildResources: build
 files:

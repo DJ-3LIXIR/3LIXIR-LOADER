@@ -148,8 +148,35 @@ async function removeWindowsPath(fullPath: string): Promise<void> {
   }
 }
 
+// ── OAuth deep linking ────────────────────────────────────────────────────────
+const PROTOCOL = '3lixir-loader'
+
+let mainWindow: BrowserWindow | null = null
+// A deep link can arrive before the renderer is ready to receive it (most often on
+// Windows/Linux, where the callback launches a second instance). Hold it until then.
+let pendingAuthUrl: string | null = null
+
+function deliverAuthCallback(url: string): void {
+  if (!url.startsWith(`${PROTOCOL}://`)) return
+
+  if (mainWindow && !mainWindow.webContents.isLoading()) {
+    mainWindow.webContents.send('auth-callback', url)
+  } else {
+    pendingAuthUrl = url
+  }
+
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.focus()
+  }
+}
+
+function findDeepLink(argv: string[]): string | undefined {
+  return argv.find(arg => arg.startsWith(`${PROTOCOL}://`))
+}
+
 function createWindow(): void {
-  const mainWindow = new BrowserWindow({
+  const win = new BrowserWindow({
     width: 900,
     height: 670,
     title: '3LIXIR LOADER',
@@ -164,7 +191,7 @@ function createWindow(): void {
   })
 
   // Allow inline styles (React uses style={{}} extensively)
-  mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+  win.webContents.session.webRequest.onHeadersReceived((details, callback) => {
     callback({
       responseHeaders: {
         ...details.responseHeaders,
@@ -173,20 +200,34 @@ function createWindow(): void {
     })
   })
 
-  mainWindow.on('ready-to-show', () => {
-    mainWindow.show()
+  win.on('ready-to-show', () => {
+    win.show()
   })
 
-  mainWindow.webContents.setWindowOpenHandler((details) => {
+  win.on('closed', () => {
+    if (mainWindow === win) mainWindow = null
+  })
+
+  win.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: 'deny' }
   })
 
+  // Flush a deep link that arrived while the renderer was still booting.
+  win.webContents.on('did-finish-load', () => {
+    if (pendingAuthUrl) {
+      win.webContents.send('auth-callback', pendingAuthUrl)
+      pendingAuthUrl = null
+    }
+  })
+
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
+    win.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    win.loadFile(join(__dirname, '../renderer/index.html'))
   }
+
+  mainWindow = win
 }
 
 // ── Plugin install handler ────────────────────────────────────────────────────
@@ -490,26 +531,72 @@ ipcMain.handle('uninstall-plugin', async (_event, { pluginName }) => {
   return { success: true, removed }
 })
 
+// ── OAuth handoff to the system browser ───────────────────────────────────────
+// Google refuses to authenticate inside an embedded webview, so the provider URL
+// has to open in the user's real browser and come back via the custom protocol.
+ipcMain.handle('open-oauth', async (_event, url: string) => {
+  if (typeof url !== 'string' || !/^https:\/\//.test(url)) {
+    return { success: false, error: 'Invalid OAuth URL' }
+  }
+  await shell.openExternal(url)
+  return { success: true }
+})
+
 app.setName('3LIXIR LOADER')
 
-app.whenReady().then(() => {
-  electronApp.setAppUserModelId('com.3lixir.loader')
+// On Windows and Linux the deep link starts a second copy of the app; the lock
+// funnels that callback into the instance the user is already looking at.
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
 
-  // Set dock icon on macOS
-  if (process.platform === 'darwin') {
-    app.dock?.setIcon(nativeImage.createFromPath(icon))
-  }
+if (!gotSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', (_event, argv) => {
+    const deepLink = findDeepLink(argv)
+    if (deepLink) deliverAuthCallback(deepLink)
 
-  app.on('browser-window-created', (_, window) => {
-    optimizer.watchWindowShortcuts(window)
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.focus()
+    }
   })
 
-  createWindow()
-
-  app.on('activate', function () {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  // macOS delivers deep links through this event rather than argv.
+  app.on('open-url', (event, url) => {
+    event.preventDefault()
+    deliverAuthCallback(url)
   })
-})
+
+  app.whenReady().then(() => {
+    electronApp.setAppUserModelId('com.3lixir.loader')
+
+    // Register 3lixir-loader:// so Supabase can redirect back into the app.
+    if (is.dev && process.platform === 'win32') {
+      app.setAsDefaultProtocolClient(PROTOCOL, process.execPath, [path.resolve(process.argv[1])])
+    } else {
+      app.setAsDefaultProtocolClient(PROTOCOL)
+    }
+
+    // Set dock icon on macOS
+    if (process.platform === 'darwin') {
+      app.dock?.setIcon(nativeImage.createFromPath(icon))
+    }
+
+    app.on('browser-window-created', (_, window) => {
+      optimizer.watchWindowShortcuts(window)
+    })
+
+    createWindow()
+
+    // A cold start from a deep link carries the callback in argv.
+    const launchDeepLink = findDeepLink(process.argv)
+    if (launchDeepLink) deliverAuthCallback(launchDeepLink)
+
+    app.on('activate', function () {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    })
+  })
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {

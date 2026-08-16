@@ -11,6 +11,9 @@ type LoaderAPI = {
     }
   }>
   uninstallPlugin: (pluginName: string) => Promise<{ success: boolean; removed?: string[]; error?: string }>
+  openOAuth: (url: string) => Promise<{ success: boolean; error?: string }>
+  /** Subscribes to OAuth deep links. Returns an unsubscribe function. */
+  onAuthCallback: (callback: (url: string) => void) => () => void
 }
 
 declare global {

@@ -38,6 +38,7 @@ function normalizePluginStatus(status: string): 'update' | 'installed' | 'not-in
 export default function App() {
   const [user, setUser] = useState<User | null>(null)
   const [authLoading, setAuthLoading] = useState(true)
+  const [oauthError, setOauthError] = useState('')
 
   const [plugins, setPlugins] = useState<Plugin[]>([])
   const [ownedPluginIds, setOwnedPluginIds] = useState<Set<string>>(new Set())
@@ -62,6 +63,32 @@ export default function App() {
     })
 
     return () => listener.subscription.unsubscribe()
+  }, [])
+
+  // ── OAuth deep link ───────────────────────────────────────────────────────
+  // The browser sends the user back to 3lixir-loader://auth-callback?code=…, which
+  // the main process forwards here. The exchange has to run in the renderer because
+  // that is where the PKCE code verifier was stored when the flow started.
+  useEffect(() => {
+    return window.api.onAuthCallback(async (url) => {
+      try {
+        const params = new URL(url).searchParams
+        const providerError = params.get('error_description') ?? params.get('error')
+        if (providerError) {
+          setOauthError(providerError)
+          return
+        }
+
+        const code = params.get('code')
+        if (!code) return
+
+        const { error } = await supabase.auth.exchangeCodeForSession(code)
+        if (error) setOauthError(error.message)
+        else setOauthError('')
+      } catch {
+        setOauthError('Sign-in failed. Please try again.')
+      }
+    })
   }, [])
 
   // ── Plugins ───────────────────────────────────────────────────────────────
@@ -292,7 +319,7 @@ export default function App() {
   }
 
   if (!user) {
-    return <LoginScreen />
+    return <LoginScreen oauthError={oauthError} />
   }
 
   // ── Main UI ───────────────────────────────────────────────────────────────
