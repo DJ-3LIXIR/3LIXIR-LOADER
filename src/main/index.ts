@@ -12,6 +12,69 @@ type InstallSummary = {
   content: string[]
 }
 
+type ManifestEntry = {
+  pluginName: string
+  version: string
+  paths: string[]
+  installedAt: string
+}
+
+type Manifest = Record<string, ManifestEntry>
+
+// ── Local install tracking ────────────────────────────────────────────────────
+// Install state is per-machine, so it lives on disk here rather than in Supabase.
+// The manifest records what this loader installed (exact paths + version); a disk
+// scan catches plugins the user already had from somewhere else.
+
+function pluginExtsForPlatform(): string[] {
+  return process.platform === 'darwin'
+    ? ['.vst3', '.component', '.au', '.aaxplugin']
+    : ['.vst3', '.vst', '.dll', '.aaxplugin', '.clap']
+}
+
+function installDirsForPlatform(): Record<string, string> {
+  return process.platform === 'darwin'
+    ? {
+        '.vst3':      path.join(os.homedir(), 'Library/Audio/Plug-Ins/VST3'),
+        '.component': path.join(os.homedir(), 'Library/Audio/Plug-Ins/Components'),
+        '.au':        path.join(os.homedir(), 'Library/Audio/Plug-Ins/Components'),
+        '.aaxplugin': '/Library/Application Support/Avid/Audio/Plug-Ins',
+      }
+    : {
+        '.vst3':      path.join(os.homedir(), 'Documents', 'VST3'),
+        '.vst':       resolveWindowsVst2InstallDir(),
+        '.dll':       path.join(os.homedir(), 'Documents', 'VSTPlugins'),
+        '.aaxplugin': path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files', 'Avid', 'Audio', 'Plug-Ins'),
+        '.clap':      path.join(process.env['COMMONPROGRAMFILES'] || path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files'), 'CLAP'),
+      }
+}
+
+function manifestPath(): string {
+  return path.join(app.getPath('userData'), 'installed-plugins.json')
+}
+
+function readManifest(): Manifest {
+  try {
+    return JSON.parse(fs.readFileSync(manifestPath(), 'utf8')) as Manifest
+  } catch {
+    return {}
+  }
+}
+
+function writeManifest(manifest: Manifest): void {
+  try {
+    fs.mkdirSync(path.dirname(manifestPath()), { recursive: true })
+    fs.writeFileSync(manifestPath(), JSON.stringify(manifest, null, 2))
+  } catch (err) {
+    console.error('Could not write install manifest:', err)
+  }
+}
+
+/** Loose key so "ARK 2", "ark-2" and "Ark2.vst3" all collapse to one identity. */
+function normalizePluginKey(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '')
+}
+
 function isPermissionError(err: unknown): boolean {
   return (
     err instanceof Error &&
@@ -231,7 +294,7 @@ function createWindow(): void {
 }
 
 // ── Plugin install handler ────────────────────────────────────────────────────
-ipcMain.handle('install-plugin', async (_event, { filename, data }) => {
+ipcMain.handle('install-plugin', async (_event, { filename, data, pluginId, pluginName, version }) => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), '3lixir-'))
   const zipPath = path.join(tempDir, filename)
   const isMac = process.platform === 'darwin'
@@ -255,29 +318,14 @@ ipcMain.handle('install-plugin', async (_event, { filename, data }) => {
     })
 
     // 3. Find all plugin files/bundles recursively inside the unzipped folder
-    const PLUGIN_EXTS = isMac
-      ? ['.vst3', '.component', '.au', '.aaxplugin']
-      : ['.vst3', '.vst', '.dll', '.aaxplugin', '.clap']
+    const PLUGIN_EXTS = pluginExtsForPlatform()
     const currentPlatform = isMac ? 'mac' : 'windows'
     const platformMarkers = {
       mac: new Set(['mac', 'macos', 'osx', 'darwin', 'macosx']),
       windows: new Set(['win', 'win32', 'win64', 'windows', 'visualstudio', 'visualstudio2026', 'x64']),
     }
 
-    const installDirs: Record<string, string> = isMac
-      ? {
-          '.vst3':      path.join(os.homedir(), 'Library/Audio/Plug-Ins/VST3'),
-          '.component': path.join(os.homedir(), 'Library/Audio/Plug-Ins/Components'),
-          '.au':        path.join(os.homedir(), 'Library/Audio/Plug-Ins/Components'),
-          '.aaxplugin': '/Library/Application Support/Avid/Audio/Plug-Ins',
-        }
-      : {
-          '.vst3':      path.join(os.homedir(), 'Documents', 'VST3'),
-          '.vst':       resolveWindowsVst2InstallDir(),
-          '.dll':       path.join(os.homedir(), 'Documents', 'VSTPlugins'),
-          '.aaxplugin': path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files', 'Avid', 'Audio', 'Plug-Ins'),
-          '.clap':      path.join(process.env['COMMONPROGRAMFILES'] || path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files'), 'CLAP'),
-        }
+    const installDirs = installDirsForPlatform()
     const installSummary: InstallSummary = { plugins: [], content: [] }
 
     function isBuildArtifact(entry: string): boolean {
@@ -468,7 +516,19 @@ ipcMain.handle('install-plugin', async (_event, { filename, data }) => {
       throw new Error(`No installable plugins or content folders found in ${filename}`)
     }
 
-    // 5. Clean up temp files
+    // 5. Record the install locally so status survives restarts and stays per-machine
+    if (pluginId) {
+      const manifest = readManifest()
+      manifest[pluginId] = {
+        pluginName: pluginName ?? filename,
+        version: version ?? '',
+        paths: [...installSummary.plugins, ...installSummary.content],
+        installedAt: new Date().toISOString(),
+      }
+      writeManifest(manifest)
+    }
+
+    // 6. Clean up temp files
     fs.rmSync(tempDir, { recursive: true, force: true })
 
     return { success: true, installed: installSummary }
@@ -480,55 +540,101 @@ ipcMain.handle('install-plugin', async (_event, { filename, data }) => {
 })
 
 // ── Plugin uninstall handler ──────────────────────────────────────────────────
-ipcMain.handle('uninstall-plugin', async (_event, { pluginName }) => {
+ipcMain.handle('uninstall-plugin', async (_event, { pluginName, pluginId }) => {
   const isMac = process.platform === 'darwin'
-  const PLUGIN_EXTS = isMac
-    ? ['.vst3', '.component', '.au', '.aaxplugin']
-    : ['.vst3', '.vst', '.dll', '.aaxplugin', '.clap']
-
-  const installDirs: Record<string, string> = isMac
-    ? {
-        '.vst3':      path.join(os.homedir(), 'Library/Audio/Plug-Ins/VST3'),
-        '.component': path.join(os.homedir(), 'Library/Audio/Plug-Ins/Components'),
-        '.au':        path.join(os.homedir(), 'Library/Audio/Plug-Ins/Components'),
-        '.aaxplugin': '/Library/Application Support/Avid/Audio/Plug-Ins',
-      }
-    : {
-        '.vst3':      path.join(os.homedir(), 'Documents', 'VST3'),
-        '.vst':       resolveWindowsVst2InstallDir(),
-        '.dll':       path.join(os.homedir(), 'Documents', 'VSTPlugins'),
-        '.aaxplugin': path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files', 'Avid', 'Audio', 'Plug-Ins'),
-        '.clap':      path.join(process.env['COMMONPROGRAMFILES'] || path.join(process.env['PROGRAMFILES'] || 'C:\\Program Files', 'Common Files'), 'CLAP'),
-      }
-
+  const PLUGIN_EXTS = pluginExtsForPlatform()
+  const installDirs = installDirsForPlatform()
+  const manifest = readManifest()
   const removed: string[] = []
+
+  async function removePath(fullPath: string): Promise<void> {
+    const needsElevation = isMac && fullPath.startsWith('/Library/')
+    if (needsElevation) {
+      const script = `rm -rf "${fullPath}"`
+      execSync(
+        `osascript -e 'do shell script "${script.replace(/"/g, '\\"')}" with administrator privileges'`
+      )
+    } else if (!isMac) {
+      await removeWindowsPath(fullPath)
+    } else {
+      fs.rmSync(fullPath, { recursive: true, force: true })
+    }
+    removed.push(fullPath)
+  }
+
+  // Prefer the exact paths recorded at install time — safer than guessing by name.
+  const tracked = pluginId ? manifest[pluginId] : undefined
+  if (tracked) {
+    for (const trackedPath of tracked.paths) {
+      if (fs.existsSync(trackedPath)) await removePath(trackedPath)
+    }
+  }
+
+  // Fall back to name matching for plugins this loader did not install.
+  if (removed.length === 0) {
+    const target = normalizePluginKey(pluginName)
+    for (const ext of PLUGIN_EXTS) {
+      const dir = installDirs[ext]
+      if (!dir || !fs.existsSync(dir)) continue
+
+      for (const entry of fs.readdirSync(dir)) {
+        const entryExt = path.extname(entry)
+        if (entryExt.toLowerCase() !== ext) continue
+        if (normalizePluginKey(path.basename(entry, entryExt)) !== target) continue
+        await removePath(path.join(dir, entry))
+      }
+    }
+  }
+
+  if (pluginId && manifest[pluginId]) {
+    delete manifest[pluginId]
+    writeManifest(manifest)
+  }
+
+  return { success: true, removed }
+})
+
+// ── Detect what is already installed on this machine ──────────────────────────
+ipcMain.handle('scan-installed', async () => {
+  const manifest = readManifest()
+  const PLUGIN_EXTS = pluginExtsForPlatform()
+  const installDirs = installDirsForPlatform()
+  const detected: Record<string, { name: string; path: string }> = {}
 
   for (const ext of PLUGIN_EXTS) {
     const dir = installDirs[ext]
     if (!dir || !fs.existsSync(dir)) continue
 
-    for (const entry of fs.readdirSync(dir)) {
+    let entries: string[]
+    try {
+      entries = fs.readdirSync(dir)
+    } catch {
+      continue // unreadable dir (e.g. the Avid path without admin rights)
+    }
+
+    for (const entry of entries) {
       const entryExt = path.extname(entry)
-      const entryBase = path.basename(entry, entryExt)
-      if (entryExt === ext && entryBase.toLowerCase() === pluginName.toLowerCase()) {
-        const fullPath = path.join(dir, entry)
-        const needsElevation = isMac && dir.startsWith('/Library/')
-        if (needsElevation) {
-          const script = `rm -rf "${fullPath}"`
-          execSync(
-            `osascript -e 'do shell script "${script.replace(/"/g, '\\"')}" with administrator privileges'`
-          )
-        } else if (!isMac) {
-          await removeWindowsPath(fullPath)
-        } else {
-          fs.rmSync(fullPath, { recursive: true, force: true })
-        }
-        removed.push(fullPath)
-      }
+      if (entryExt.toLowerCase() !== ext) continue
+
+      const base = path.basename(entry, entryExt)
+      const key = normalizePluginKey(base)
+      if (!key || detected[key]) continue
+
+      detected[key] = { name: base, path: path.join(dir, entry) }
     }
   }
 
-  return { success: true, removed }
+  // Self-heal: forget anything the user deleted by hand outside the loader.
+  let pruned = false
+  for (const [id, entry] of Object.entries(manifest)) {
+    if (!entry.paths.some(p => fs.existsSync(p))) {
+      delete manifest[id]
+      pruned = true
+    }
+  }
+  if (pruned) writeManifest(manifest)
+
+  return { manifest, detected }
 })
 
 // ── OAuth handoff to the system browser ───────────────────────────────────────

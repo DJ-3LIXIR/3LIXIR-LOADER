@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import type { User } from '@supabase/supabase-js'
 import brickBg from './assets/brick.png'
 import { supabase } from './supabase'
@@ -35,6 +35,30 @@ function normalizePluginStatus(status: string): 'update' | 'installed' | 'not-in
   return 'unknown'
 }
 
+type PluginStatus = ReturnType<typeof normalizePluginStatus>
+
+type LocalInstallState = {
+  manifest: Record<string, { pluginName: string; version: string; paths: string[]; installedAt: string }>
+  detected: Record<string, { name: string; path: string }>
+}
+
+/** Must match normalizePluginKey in the main process. */
+function normalizePluginKey(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '')
+}
+
+/** Numeric-segment compare: returns >0 when a is newer than b. */
+function compareVersions(a: string, b: string): number {
+  const partsA = a.split(/[.\-+_]/).map(n => parseInt(n, 10) || 0)
+  const partsB = b.split(/[.\-+_]/).map(n => parseInt(n, 10) || 0)
+
+  for (let i = 0; i < Math.max(partsA.length, partsB.length); i++) {
+    const diff = (partsA[i] ?? 0) - (partsB[i] ?? 0)
+    if (diff !== 0) return diff
+  }
+  return 0
+}
+
 export default function App() {
   const [user, setUser] = useState<User | null>(null)
   const [authLoading, setAuthLoading] = useState(true)
@@ -50,6 +74,51 @@ export default function App() {
   const [activeNav, setActiveNav] = useState<NavItem>('all')
   const [search, setSearch] = useState('')
   const [categories, setCategories] = useState<Category[]>(['Apps', 'Content', 'Plugins', 'Instruments', 'Audio Units'])
+  const [localInstalls, setLocalInstalls] = useState<LocalInstallState>({ manifest: {}, detected: {} })
+
+  // ── Local install detection ───────────────────────────────────────────────
+  // Install state is a property of this machine, not of the catalog, so it is
+  // read off disk on every launch instead of stored in Supabase.
+  const refreshInstalled = useCallback(async () => {
+    try {
+      setLocalInstalls(await window.api.scanInstalled())
+    } catch (err) {
+      console.error('Install scan failed:', err)
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+
+    window.api
+      .scanInstalled()
+      .then(state => {
+        if (!cancelled) setLocalInstalls(state)
+      })
+      .catch(err => console.error('Install scan failed:', err))
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const resolveStatus = useCallback((plugin: Plugin): PluginStatus => {
+    // "Coming soon" is a catalog fact, so it always wins over local state.
+    if (normalizePluginStatus(plugin.status) === 'coming soon') return 'coming soon'
+
+    const tracked = localInstalls.manifest[plugin.id]
+    if (tracked) {
+      const outdated =
+        tracked.version && plugin.version && compareVersions(plugin.version, tracked.version) > 0
+      return outdated ? 'update' : 'installed'
+    }
+
+    // Installed outside the loader: present on disk, but version is unknown, so
+    // never claim an update is available.
+    if (localInstalls.detected[normalizePluginKey(plugin.name)]) return 'installed'
+
+    return 'not-installed'
+  }, [localInstalls])
 
   // ── Auth ──────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -239,13 +308,16 @@ export default function App() {
       setDownloadLabel(`Installing ${plugin.name}…`)
 
       const filename = fileResponse.headers.get('X-3lixir-Filename') || `${plugin.name.replace(/\s+/g, '_')}.zip`
-      const result = await window.api.installPlugin(filename, allBytes)
+      const result = await window.api.installPlugin(filename, allBytes, {
+        pluginId: plugin.id,
+        pluginName: plugin.name,
+        version: plugin.version,
+      })
 
       if (result.success) {
         setDownloadProgress(100)
         setDownloadLabel(`${plugin.name} installed`)
-        await supabase.from('plugins').update({ status: 'installed' }).eq('id', plugin.id)
-        setPlugins(prev => prev.map(p => p.id === plugin.id ? { ...p, status: 'installed' } : p))
+        await refreshInstalled()
         setTimeout(() => { setDownloadProgress(0); setDownloadLabel('') }, 2000)
       } else {
         throw new Error(result.error)
@@ -264,10 +336,9 @@ export default function App() {
     if (uninstalling) return
     setUninstalling(plugin.id)
     try {
-      const result = await window.api.uninstallPlugin(plugin.name)
+      const result = await window.api.uninstallPlugin(plugin.name, plugin.id)
       if (result.success) {
-        await supabase.from('plugins').update({ status: 'not-installed' }).eq('id', plugin.id)
-        setPlugins(prev => prev.map(p => p.id === plugin.id ? { ...p, status: 'not-installed' } : p))
+        await refreshInstalled()
       }
     } catch (err: unknown) {
       console.error('Uninstall failed:', err)
@@ -284,7 +355,7 @@ export default function App() {
 
   const filtered = plugins.filter(p => {
     if (!ownedPluginIds.has(p.id)) return false
-    const status = normalizePluginStatus(p.status)
+    const status = resolveStatus(p)
     const matchesNav =
       activeNav === 'all' ||
       (activeNav === 'updates' && status === 'update') ||
@@ -301,11 +372,11 @@ export default function App() {
   const navItems: { key: NavItem; label: string; count: number }[] = [
     { key: 'all', label: 'All', count: owned.length },
     { key: 'not-installed', label: 'Not installed', count: owned.filter(p => {
-      const status = normalizePluginStatus(p.status)
+      const status = resolveStatus(p)
       return status === 'not-installed' || status === 'available' || status === 'unknown'
     }).length },
-    { key: 'updates', label: 'Available updates', count: owned.filter(p => normalizePluginStatus(p.status) === 'update').length },
-    { key: 'installed', label: 'Installed products', count: owned.filter(p => normalizePluginStatus(p.status) === 'installed').length },
+    { key: 'updates', label: 'Available updates', count: owned.filter(p => resolveStatus(p) === 'update').length },
+    { key: 'installed', label: 'Installed products', count: owned.filter(p => resolveStatus(p) === 'installed').length },
     { key: 'hidden', label: 'Hidden products', count: 0 },
   ]
 
@@ -494,7 +565,7 @@ export default function App() {
               </div>
             ) : (
               filtered.map(plugin => {
-                const status = normalizePluginStatus(plugin.status)
+                const status = resolveStatus(plugin)
                 return (
                 <div key={plugin.id} style={{
                   display: 'flex', alignItems: 'center',

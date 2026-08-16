@@ -3,10 +3,14 @@ import { electronAPI } from '@electron-toolkit/preload'
 
 const api = {
   getPlatform: () => process.platform,
-  installPlugin: (filename: string, data: Uint8Array) =>
-    ipcRenderer.invoke('install-plugin', { filename, data }),
-  uninstallPlugin: (pluginName: string) =>
-    ipcRenderer.invoke('uninstall-plugin', { pluginName }),
+  installPlugin: (
+    filename: string,
+    data: Uint8Array,
+    meta?: { pluginId?: string; pluginName?: string; version?: string }
+  ) => ipcRenderer.invoke('install-plugin', { filename, data, ...meta }),
+  uninstallPlugin: (pluginName: string, pluginId?: string) =>
+    ipcRenderer.invoke('uninstall-plugin', { pluginName, pluginId }),
+  scanInstalled: () => ipcRenderer.invoke('scan-installed'),
   openOAuth: (url: string) => ipcRenderer.invoke('open-oauth', url),
   onAuthCallback: (callback: (url: string) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, url: string): void => callback(url)
