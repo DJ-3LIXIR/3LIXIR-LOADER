@@ -212,7 +212,7 @@ async function removeWindowsPath(fullPath: string): Promise<void> {
 }
 
 // ── OAuth deep linking ────────────────────────────────────────────────────────
-const PROTOCOL = '3lixir-loader'
+const PROTOCOL = 'com.3lixirmusic.loader'
 
 let mainWindow: BrowserWindow | null = null
 // A deep link can arrive before the renderer is ready to receive it (most often on
@@ -676,7 +676,7 @@ if (!gotSingleInstanceLock) {
   app.whenReady().then(() => {
     electronApp.setAppUserModelId('com.3lixir.loader')
 
-    // Register 3lixir-loader:// so Supabase can redirect back into the app.
+    // Register com.3lixirmusic.loader:// so Supabase can redirect back into the app.
     if (is.dev && process.platform === 'win32') {
       app.setAsDefaultProtocolClient(PROTOCOL, process.execPath, [path.resolve(process.argv[1])])
     } else {

@@ -3,7 +3,7 @@ productName: 3LIXIR LOADER
 protocols:
   - name: 3LIXIR Loader
     schemes:
-      - 3lixir-loader
+      - com.3lixirmusic.loader
 directories:
   buildResources: build
 files:

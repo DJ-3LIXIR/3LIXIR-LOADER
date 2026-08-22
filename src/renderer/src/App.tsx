@@ -135,7 +135,7 @@ export default function App() {
   }, [])
 
   // ── OAuth deep link ───────────────────────────────────────────────────────
-  // The browser sends the user back to 3lixir-loader://auth-callback?code=…, which
+  // The browser sends the user back to com.3lixirmusic.loader://auth-callback?code=…, which
   // the main process forwards here. The exchange has to run in the renderer because
   // that is where the PKCE code verifier was stored when the flow started.
   useEffect(() => {
